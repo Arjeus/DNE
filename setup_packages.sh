@@ -1,1 +1,1 @@
-python -m pip install -r /home/DEN/requirements.txt -f https://download.pytorch.org/whl/torch_stable.html
+python -m pip install -r requirements.txt -f https://download.pytorch.org/whl/torch_stable.html

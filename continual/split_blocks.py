@@ -69,7 +69,7 @@ class Proj_wAttn(nn.Module):
             attn_mask = (self.attn.max(dim=2)[0] > self.attn_thd)
             forward_attn = self.attn.expand(B, N, -1, -1)
         else:
-            attn_mask = torch.ones(true_head_num, dtype=torch.bool).cuda()
+            attn_mask = torch.ones(true_head_num, dtype=torch.bool).to(x.device)
             forward_attn = attn
         if self.proj_type == "shared_Linear":
             x_proj = self.proj_blocks(x)
@@ -94,7 +94,8 @@ class Task_Attn(nn.Module):
         self.lambda_scaled = lambda_scaled
         self.lambda_scaled_init = lambda_scaled_init
         if self.lambda_scaled:
-            self.lambda_factor = nn.Parameter(torch.ones(1).cuda() * lambda_scaled_init)
+            # Replace hardcoded cuda() with device-agnostic approach
+            self.lambda_factor = nn.Parameter(torch.ones(1) * lambda_scaled_init)
 
         self.record_mean = record_mean and True
         self.mean_attn = None
@@ -129,13 +130,14 @@ class Task_Attn(nn.Module):
         self.apply(self._init_weights)
         self.mean_attn = None
         if self.lambda_scaled:
-            self.lambda_factor = nn.Parameter(torch.ones(1).cuda() * self.lambda_scaled_init)
+            self.lambda_factor = nn.Parameter(torch.ones(1) * self.lambda_scaled_init)
 
     def update_mean_attn(self, attn):
         B, N, H1, H2 = attn.shape
         attn = attn.reshape(B*N, H1, H2).mean(dim=0).detach()
         if self.mean_attn is None:
-            self.mean_attn = torch.ones(H1, H2).cuda() / (1 if self.constant_scaled else H2)
+            # Replace hardcoded .cuda() with device from input tensor
+            self.mean_attn = torch.ones(H1, H2).to(attn.device) / (1 if self.constant_scaled else H2)
         self.mean_attn = (1 - self.momentun) * attn + self.momentun * self.mean_attn
 
     def _init_weights(self, m):
@@ -158,7 +160,8 @@ class Task_Attn(nn.Module):
                 x_old = x_old.unsqueeze(1)
             B, N, C2 = x_old.shape
             H2 = C2 // self.head_dim
-            attn = torch.ones(B, N, H1, H2).cuda()
+            # Replace hardcoded .cuda() with device from input tensor
+            attn = torch.ones(B, N, H1, H2).to(x_new.device)
             if not self.constant_scaled:
                 attn = attn.softmax(dim=-1)
             if self.mean_attn is None:
