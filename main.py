@@ -313,6 +313,8 @@ def get_args_parser():
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+    parser.add_argument('--no-distributed', action='store_true', 
+                        help='Explicitly disable distributed training')
 
     # Resuming
     parser.add_argument('--resume', default='', help='resume from checkpoint')
@@ -329,6 +331,10 @@ def get_args_parser():
 def main(args):
     print(args)
     logger = Logger(list_subsets=['train', 'test'])
+
+    # Override distributed setting if explicitly disabled
+    if args.no_distributed:
+        args.distributed = False
 
     use_distillation = args.auto_kd
     device = torch.device(args.device)

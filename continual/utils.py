@@ -225,6 +225,15 @@ def save_on_master(*args, **kwargs):
 
 
 def init_distributed_mode(args):
+    if hasattr(args, 'no_distributed') and args.no_distributed:
+        print('Explicitly not using distributed mode')
+        args.distributed = False
+        # Set device to the requested GPU
+        if args.device.startswith('cuda'):
+            device_id = int(args.device.split(':')[1]) if ':' in args.device else 0
+            torch.cuda.set_device(device_id)
+        return
+        
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ['WORLD_SIZE'])
@@ -232,6 +241,7 @@ def init_distributed_mode(args):
     elif 'SLURM_PROCID' in os.environ:
         args.rank = int(os.environ['SLURM_PROCID'])
         args.gpu = args.rank % torch.cuda.device_count()
+        args.world_size = int(os.environ['SLURM_NTASKS'])
     else:
         print('Not using distributed mode')
         args.distributed = False

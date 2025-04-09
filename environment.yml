@@ -1,0 +1,14 @@
+name: dne_env
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - torch>=2.0.0
+      - torchvision>=0.15.0
+      - timm==0.5.4
+      - continuum>=1.0.27
+      - lmdb
+      - six==1.16.0

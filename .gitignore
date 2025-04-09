@@ -3,3 +3,4 @@ checkpoints/
 continual/
 data/
 logs/
+single_gpu_run.batch
