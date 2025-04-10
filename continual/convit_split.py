@@ -158,7 +158,18 @@ class split_GPSA(nn.Module):
 
     def expand(self, extra_dim, extra_heads):
         org_head_dim = self.dim // self.num_heads
-        assert extra_heads * org_head_dim == extra_dim, "Extra head dim must be the same as original head dim!"
+        
+        # Check if dimensions are compatible
+        if extra_heads * org_head_dim != extra_dim:
+            print(f"Warning: extra_heads ({extra_heads}) * org_head_dim ({org_head_dim}) != extra_dim ({extra_dim})")
+            # Calculate appropriate number of heads for this dimension
+            extra_heads = extra_dim // org_head_dim
+            if extra_dim % org_head_dim != 0:
+                print(f"Warning: extra_dim {extra_dim} is not divisible by org_head_dim {org_head_dim}")
+                extra_heads = extra_dim // org_head_dim
+                extra_dim = extra_heads * org_head_dim
+                print(f"Adjusting extra_dim to {extra_dim}")
+        
         self.num_heads += extra_heads
         self.dim += extra_dim
         self.q.expand(extra_dim, extra_dim)
@@ -181,14 +192,6 @@ class split_GPSA(nn.Module):
             p.requires_grad = False
         self.gating_param_list.append(nn.Parameter(torch.ones(extra_heads).to(self.q.device)))
 
-
-    @property
-    def gating_param(self):
-        return torch.cat(list(self.gating_param_list), dim=-1)
-
-    def reset_parameters(self):
-        self.apply(self._init_weights)
-
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
@@ -202,37 +205,42 @@ class split_GPSA(nn.Module):
         B, N, C = x.shape
         if not hasattr(self, 'rel_indices') or self.rel_indices.size(1)!=N:
             self.get_rel_indices(N)
-
         # print("Now in SAB")
-
-        attn = self.get_attention(x)
-        # print("Disp attn in SAB")
-        # print(attn[0,0])
+        q = self.q(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        k = self.k(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        pos_score = self.rel_indices.expand(B, -1, -1,-1)
+        pos_score = self.pos_proj(pos_score).permute(0,3,1,2).reshape(B, self.num_heads, N, 3, 1)
+        patch_score = (q @ k.transpose(-2, -1)) * self.scale
+        patch_score = patch_score.softmax(dim=-1)
+        pos_score = pos_score.softmax(dim=-1)
+        gating = self.gating_param.view(1,-1,1,1)
+        attn = (1.-torch.sigmoid(gating)) * patch_score + torch.sigmoid(gating) * pos_score
+        attn /= attn.sum(dim=-1).unsqueeze(-1)
+        attn = self.attn_drop(attn)
         v = self.v(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x, attn, v
+        return x
 
     def get_attention(self, x):
         B, N, C = x.shape
         q = self.q(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
         k = self.k(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
         pos_score = self.rel_indices.expand(B, -1, -1,-1)
-        pos_score = self.pos_proj(pos_score).permute(0,3,1,2)
+        pos_score = self.pos_proj(pos_score).permute(0,3,1,2).reshape(B, self.num_heads, N, 3, 1)
         patch_score = (q @ k.transpose(-2, -1)) * self.scale
-        patch_score = patch_score.softmax(dim=-1)
-        pos_score = pos_score.softmax(dim=-1)
-
-        gating = self.gating_param.view(1,-1,1,1)
-        attn = (1.-torch.sigmoid(gating)) * patch_score + torch.sigmoid(gating) * pos_score
-        attn /= attn.sum(dim=-1).unsqueeze(-1)
-        attn = self.attn_drop(attn)
+        attn = (patch_score + pos_score).softmax(dim=-1)
         return attn
 
     def get_attention_map(self, x, return_map = False):
-
-        attn_map = self.get_attention(x).mean(0) # average over batch
+        B, N, C = x.shape
+        q = self.q(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        k = self.k(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        pos_score = self.rel_indices.expand(B, -1, -1,-1)
+        pos_score = self.pos_proj(pos_score).permute(0,3,1,2).reshape(B, self.num_heads, N, 3, 1)
+        patch_score = (q @ k.transpose(-2, -1)) * self.scale
+        attn_map = (patch_score + pos_score).softmax(dim=-1).mean(0) # average over batch
         distances = self.rel_indices.squeeze()[:,:,-1]**.5
         dist = torch.einsum('nm,hnm->h', (distances, attn_map))
         dist /= distances.size(0)
@@ -244,7 +252,6 @@ class split_GPSA(nn.Module):
     def local_init(self, locality_strength=1.):
         self.v.weight.data.copy_(torch.eye(self.dim))
         locality_distance = 1 #max(1,1/locality_strength**.5)
-
         kernel_size = int(self.num_heads**.5)
         center = (kernel_size-1)/2 if kernel_size%2==0 else kernel_size//2
         for h1 in range(kernel_size):
@@ -254,8 +261,20 @@ class split_GPSA(nn.Module):
                 self.pos_proj.weight.data[position,1] = 2*(h1-center)*locality_distance
                 self.pos_proj.weight.data[position,0] = 2*(h2-center)*locality_distance
         self.pos_proj.weight.data *= locality_strength
+        locality_distance = 1 #max(1,1/locality_strength**.5)
 
     def get_rel_indices(self, num_patches):
+        img_size = int(num_patches**.5)
+        rel_indices   = torch.zeros(1, num_patches, num_patches, 3)
+        ind = torch.arange(img_size).view(1,-1) - torch.arange(img_size).view(-1, 1)
+        indx = ind.repeat(img_size,img_size)
+        indy = ind.repeat_interleave(img_size,dim=0).repeat_interleave(img_size,dim=1)
+        indd = indx**2 + indy**2
+        rel_indices[:,:,:,2] = indd.unsqueeze(0)
+        rel_indices[:,:,:,1] = indy.unsqueeze(0)
+        rel_indices[:,:,:,0] = indx.unsqueeze(0)
+        device = self.q.device
+        self.rel_indices = rel_indices.to(device)
         img_size = int(num_patches**.5)
         rel_indices   = torch.zeros(1, num_patches, num_patches, 3)
         ind = torch.arange(img_size).view(1,-1) - torch.arange(img_size).view(-1, 1)
@@ -270,13 +289,15 @@ class split_GPSA(nn.Module):
 
 
 class split_MHSA(nn.Module):
+    """ Vision Transformer with support for patch or hybrid CNN input stage
+    """
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., fc=None):
         raise NotImplementedError("split MHSA not implemented")
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
-
+        device = self.q.device
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
@@ -285,8 +306,8 @@ class split_MHSA(nn.Module):
 
     def reset_parameters(self):
         self.apply(self._init_weights)
-
-    def _init_weights(self, m):
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
@@ -300,128 +321,25 @@ class split_MHSA(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
         attn_map = (q @ k.transpose(-2, -1)) * self.scale
-        attn_map = attn_map.softmax(dim=-1).mean(0)
-
-        img_size = int(N**.5)
-        ind = torch.arange(img_size).view(1,-1) - torch.arange(img_size).view(-1, 1)
-        indx = ind.repeat(img_size,img_size)
-        indy = ind.repeat_interleave(img_size,dim=0).repeat_interleave(img_size,dim=1)
-        indd = indx**2 + indy**2
+        attn_map = attn_map.softmax(dim=-1).mean(0) # average over batch
         distances = indd**.5
         distances = distances.to('cuda')
-
         dist = torch.einsum('nm,hnm->h', (distances, attn_map))
         dist /= N
-
         if return_map:
             return dist, attn_map
         else:
             return dist
 
     def forward(self, x):
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        x = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
-
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
-
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x, attn
-
-
-class ScaleNorm(nn.Module):
-    """See
-    https://github.com/lucidrains/reformer-pytorch/blob/a751fe2eb939dcdd81b736b2f67e745dc8472a09/reformer_pytorch/reformer_pytorch.py#L143
-    """
-    def __init__(self, dim, eps=1e-5):
-        super().__init__()
-        self.g = nn.Parameter(torch.ones(1))
-        self.eps = eps
-
-    def forward(self, x):
-        n = torch.norm(x, dim=-1, keepdim=True).clamp(min=self.eps)
-        return x / n * self.g
-
-
-class split_Block(nn.Module):
-
-    def __init__(self, dim, num_heads,  mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=split_blocks.split_LayerNorm, attention_type=split_GPSA,
-                 fc=split_blocks.split_Linear, split_block_config={}, dense_mode=['attn', 'mlp'], **kwargs):
-        super().__init__()
-        self.norm1 = norm_layer(dim)
-        attn_split_block_config = copy.deepcopy(split_block_config)
-        if 'attn' not in dense_mode:
-            attn_split_block_config['simple_proj'] = True
-            attn_split_block_config['stack'] = False
-        self.attn = attention_type(dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop,
-                                   proj_drop=drop, fc=fc, split_block_config=attn_split_block_config, **kwargs)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.norm2 = norm_layer(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp_ratio = mlp_ratio
-        mlp_split_block_config = copy.deepcopy(split_block_config)
-        mlp_mode = 'None'
-        if 'mlp' in dense_mode:
-            mlp_mode = 'All'
-        elif 'mlp_first' in dense_mode:
-            mlp_mode = 'First'
-        elif 'mlp_second' in dense_mode:
-            mlp_mode = 'Second'
-        else:
-            mlp_mode = 'None'
-        if mlp_mode == 'None':
-            mlp_split_block_config['simple_proj'] = True
-            mlp_split_block_config['stack'] = False
-        self.mlp = split_Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop, fc=fc,
-                             split_block_config=mlp_split_block_config, mlp_mode=mlp_mode)
-
-    def freeze_split_old(self):
-        self.norm1.freeze_split_old()
-        self.norm2.freeze_split_old()
-        self.attn.freeze_split_old()
-        self.mlp.freeze_split_old()
-
-    def expand(self, extra_dim, extra_heads):
-        self.norm1.expand(extra_dim)
-        self.norm2.expand(extra_dim)
-        self.attn.expand(extra_dim, extra_heads)
-        extra_mlp_hidden_dim = int(extra_dim * self.mlp_ratio)
-        self.mlp.expand(extra_dim, extra_hidden_features=extra_mlp_hidden_dim)
-
-    def reset_parameters(self):
-        self.norm1.reset_parameters()
-        self.norm2.reset_parameters()
-        self.attn.reset_parameters()
-        self.mlp.apply(self.mlp._init_weights)
-
-    def forward(self, x, mask_heads=None, task_index=1, attn_mask=None):
-        if isinstance(self.attn, split_ClassAttention) or isinstance(self.attn, split_JointCA):  # Like in CaiT
-            cls_token = x[:, :task_index]
-
-            xx = self.norm1(x)
-            xx, attn, v = self.attn(
-                xx,
-                mask_heads=mask_heads,
-                nb=task_index,
-                attn_mask=attn_mask
-            )
-
-            cls_token = self.drop_path(xx[:, :task_index]) + cls_token
-            cls_token = self.drop_path(self.mlp(self.norm2(cls_token))) + cls_token
-
-            return cls_token, attn, v
-
-        xx = self.norm1(x)
-        xx, attn, v = self.attn(xx)
-
-        x = self.drop_path(xx) + x
-        x = self.drop_path(self.mlp(self.norm2(x))) + x
-
         return x, attn, v
 
 
@@ -442,11 +360,22 @@ class split_ClassAttention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = fc(dim, dim, **split_block_config)
         self.proj_drop = nn.Dropout(proj_drop)
-
+        self.num_heads = num_heads
         self.apply(self._init_weights)
+        head_dim = dim // num_heads
 
     def reset_parameters(self):
         self.apply(self._init_weights)
+        self.q = fc(dim, dim, bias=qkv_bias, **split_block_config)
+        self.k = fc(dim, dim, bias=qkv_bias, **split_block_config)
+        self.v = fc(dim, dim, bias=qkv_bias, **split_block_config)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = fc(dim, dim, **split_block_config)
+        self.proj_drop = nn.Dropout(proj_drop)
+        self.num_heads = num_heads
+        self.apply(self._init_weights)
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -456,129 +385,230 @@ class split_ClassAttention(nn.Module):
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
+
+    def reset_parameters(self):
+        for b in self.blocks:
+            b.reset_parameters()
+        self.norm.reset_parameters()
+        self.head.apply(self._init_weights)
 
     def freeze_split_old(self):
         self.q.freeze_split_old()
         self.k.freeze_split_old()
         self.v.freeze_split_old()
         self.proj.freeze_split_old()
+        self.pos_proj.freeze_split_old()
+        for p in self.gating_param_list[:-1]:
+            p.requires_grad = False
 
     def expand(self, extra_dim, extra_heads):
         org_head_dim = self.dim // self.num_heads
-        assert extra_heads * org_head_dim == extra_dim, "Extra head dim must be the same as original head dim!"
+        
+        # Calculate how many heads we need for the desired extra dimension
+        if extra_heads * org_head_dim != extra_dim:
+            # Recalculate extra_heads to match extra_dim
+            extra_heads = extra_dim // org_head_dim
+            if extra_dim % org_head_dim != 0:
+                # Round up and adjust extra_dim
+                extra_heads = extra_dim // org_head_dim + 1
+                extra_dim = extra_heads * org_head_dim
+                print(f"Warning: Adjusting extra_dim to {extra_dim} to match head dimension {org_head_dim}")
+        
+        # Now expand the block components
         self.num_heads += extra_heads
         self.dim += extra_dim
-        self.q.expand(extra_dim, extra_dim)
-        self.k.expand(extra_dim, extra_dim)
-        self.v.expand(extra_dim, extra_dim)
-        self.proj.expand(extra_dim, extra_dim)
+        self.norm1.expand(extra_dim)
+        self.attn.expand(extra_dim, extra_heads)
+        self.norm2.expand(extra_dim)
+        
+        if "mlp" in self.dense_mode:
+            self.mlp.expand(extra_dim, extra_dim * self.mlp_ratio)
 
-    def forward(self, x, mask_heads=None, **kwargs):
-        # print("Now in TAB")
-        B, N, C = x.shape
-        q = self.q(x[:,0]).unsqueeze(1).reshape(B, 1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-        k = self.k(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+    def forward(self, x, mask_heads=None, task_index=1, attn_mask=None):
+        if isinstance(self.attn, split_ClassAttention) or isinstance(self.attn, split_JointCA):  # Like in CaiT
+            cls_token = x[:, :task_index]
+            xx = self.norm1(x)
+            xx, attn, v = self.attn(
+                xx,
+                mask_heads=mask_heads,
+                nb=task_index,
+                attn_mask=attn_mask
+            )
+            cls_token = self.drop_path(xx[:, :task_index]) + cls_token
+            cls_token = self.drop_path(self.mlp(self.norm2(cls_token))) + cls_token
 
-        q = q * self.scale
-        v = self.v(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+            return cls_token, attn, v
+        else:
+            xx = self.norm1(x)
+            xx, attn = self.attn(xx)
+            x = self.drop_path(xx) + x
+            x = self.drop_path(self.mlp(self.norm2(x))) + x
 
-        attn = (q @ k.transpose(-2, -1))
-        attn = attn.softmax(dim=-1)
-        # print("Disp attn in TAB")
-        # print(attn[0, 0])
-        attn = self.attn_drop(attn)
-
-        if mask_heads is not None:
-            mask_heads = mask_heads.expand(B, self.num_heads, -1, N)
-            attn = attn * mask_heads
-
-        x_cls = (attn @ v).transpose(1, 2).reshape(B, 1, C)
-        x_cls = self.proj(x_cls)
-        x_cls = self.proj_drop(x_cls)
-
-        return x_cls, attn, v
+            return x, attn, None
 
 
-class split_JointCA(nn.Module):
-    """Forward all task tokens together.
-
-    It uses a masked attention so that task tokens don't interact between them.
-    It should have the same results as independent forward per task token but being
-    much faster.
-
-    HOWEVER, it works a bit worse (like ~2pts less in 'all top-1' CIFAR100 50 steps).
-    So if anyone knows why, please tell me!
-    """
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., fc=nn.Linear):
-        raise NotImplementedError("split JointCA not implemented")
+class split_Block(nn.Module):
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
+                 drop_path=0., act_layer=nn.GELU, norm_layer=split_blocks.split_LayerNorm, attention_type=split_GPSA,
+                 fc=split_blocks.split_Linear, split_block_config={}, dense_mode=['attn', 'mlp'], **kwargs):
         super().__init__()
+        
+        # Initialize norm layers without passing any extra config
+        self.norm1 = norm_layer(dim)
+        self.attn = attention_type(
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale,
+            attn_drop=attn_drop, proj_drop=drop, fc=fc, split_block_config=split_block_config)
+        # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        
+        # Use the split_Mlp class defined in this file instead of looking for it in split_blocks
+        self.mlp = split_Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop, fc=fc, **split_block_config)
+
+        self.split = split_block_config.get('split', False)
+        self.stack = split_block_config.get('stack', True)
+        self.dim = dim
         self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim ** -0.5
+        self.mlp_ratio = mlp_ratio
+        self.dense_mode = dense_mode
 
-        self.q = fc(dim, dim, bias=qkv_bias)
-        self.k = fc(dim, dim, bias=qkv_bias)
-        self.v = fc(dim, dim, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = fc(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
+    def freeze_split_old(self):
+        self.norm1.freeze_split_old()
+        self.attn.freeze_split_old()
+        self.norm2.freeze_split_old()
+        self.mlp.freeze_split_old()
 
-        self.apply(self._init_weights)
+    def expand(self, extra_dim, extra_heads):
+        org_head_dim = self.dim // self.num_heads
+        
+        # Check if dimensions are compatible
+        if extra_heads * org_head_dim != extra_dim:
+            print(f"Warning: extra_heads ({extra_heads}) * org_head_dim ({org_head_dim}) != extra_dim ({extra_dim})")
+            # Calculate appropriate number of heads for this dimension
+            extra_heads = extra_dim // org_head_dim
+            if extra_dim % org_head_dim != 0:
+                print(f"Warning: extra_dim {extra_dim} is not divisible by org_head_dim {org_head_dim}")
+                extra_heads = extra_dim // org_head_dim
+                extra_dim = extra_heads * org_head_dim
+                print(f"Adjusting extra_dim to {extra_dim}")
+        
+        self.num_heads += extra_heads
+        self.dim += extra_dim
+        self.norm1.expand(extra_dim)
+        self.attn.expand(extra_dim, extra_heads)
+        self.norm2.expand(extra_dim)
+        
+        if "mlp" in self.dense_mode:
+            self.mlp.expand(extra_dim, extra_dim * self.mlp_ratio)
 
     def reset_parameters(self):
-        self.apply(self._init_weights)
+        self.norm1.reset_parameters()
+        self.attn.reset_parameters()
+        self.norm2.reset_parameters()
+        self.mlp.reset_parameters()
 
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
+    def forward(self, x, mask_heads=None, task_index=1, attn_mask=None):
+        if isinstance(self.attn, split_ClassAttention) or isinstance(self.attn, split_JointCA):  # Like in CaiT
+            cls_token = x[:, :task_index]
+            xx = self.norm1(x)
+            xx, attn, v = self.attn(
+                xx,
+                mask_heads=mask_heads,
+                nb=task_index,
+                attn_mask=attn_mask
+            )
+            cls_token = self.drop_path(xx[:, :task_index]) + cls_token
+            cls_token = self.drop_path(self.mlp(self.norm2(cls_token))) + cls_token
 
-    @lru_cache(maxsize=1)
-    def get_attention_mask(self, attn_shape, nb_task_tokens):
-        """Mask so that task tokens don't interact together.
+            return cls_token, attn, v
+        else:
+            xx = self.norm1(x)
+            xx, attn = self.attn(xx)
+            x = self.drop_path(xx) + x
+            x = self.drop_path(self.mlp(self.norm2(x))) + x
 
-        Given two task tokens (t1, t2) and three patch tokens (p1, p2, p3), the
-        attention matrix is:
+            return x, attn, None
 
-        t1-t1 t1-t2 t1-p1 t1-p2 t1-p3
-        t2-t1 t2-t2 t2-p1 t2-p2 t2-p3
 
-        So that the mask (True values are deleted) should be:
+class split_Block_Old(nn.Module):
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
+                 drop_path=0., act_layer=nn.GELU, norm_layer=split_blocks.split_LayerNorm, attention_type=split_GPSA,
+                 fc=split_blocks.split_Linear, split_block_config={}, dense_mode=['attn', 'mlp'], **kwargs):
+        super().__init__()
+        self.norm1 = norm_layer(dim, **split_block_config)
+        self.attn = attention_type(
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale,
+            attn_drop=attn_drop, proj_drop=drop, fc=fc, split_block_config=split_block_config)
+        # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim, **split_block_config)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = split_blocks.split_Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop, fc=fc, **split_block_config)
 
-        False True False False False
-        True False False False False
-        """
-        mask = torch.zeros(attn_shape, dtype=torch.bool)
-        for i in range(nb_task_tokens):
-            mask[:, i, :i] = True
-            mask[:, i, i+1:nb_task_tokens] = True
-        return mask
+        self.split = split_block_config.get('split', False)
+        self.stack = split_block_config.get('stack', True)
+        self.dim = dim
+        self.num_heads = num_heads
+        self.mlp_ratio = mlp_ratio
+        self.dense_mode = dense_mode
 
-    def forward(self, x, attn_mask=False, nb_task_tokens=1, **kwargs):
-        B, N, C = x.shape
-        q = self.q(x[:,:nb_task_tokens]).reshape(B, nb_task_tokens, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-        k = self.k(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+    def freeze_split_old(self):
+        self.norm1.freeze_split_old()
+        self.attn.freeze_split_old()
+        self.norm2.freeze_split_old()
+        self.mlp.freeze_split_old()
 
-        q = q * self.scale
-        v = self.v(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+    def expand(self, extra_dim, extra_heads):
+        org_head_dim = self.dim // self.num_heads
+        
+        # Check if dimensions are compatible
+        if extra_heads * org_head_dim != extra_dim:
+            print(f"Warning: extra_heads ({extra_heads}) * org_head_dim ({org_head_dim}) != extra_dim ({extra_dim})")
+            # Calculate appropriate number of heads for this dimension
+            extra_heads = extra_dim // org_head_dim
+            if extra_dim % org_head_dim != 0:
+                print(f"Warning: extra_dim {extra_dim} is not divisible by org_head_dim {org_head_dim}")
+                extra_heads = extra_dim // org_head_dim
+                extra_dim = extra_heads * org_head_dim
+                print(f"Adjusting extra_dim to {extra_dim}")
+        
+        self.num_heads += extra_heads
+        self.dim += extra_dim
+        self.norm1.expand(extra_dim)
+        self.attn.expand(extra_dim, extra_heads)
+        self.norm2.expand(extra_dim)
+        
+        if "mlp" in self.dense_mode:
+            self.mlp.expand(extra_dim, extra_dim * self.mlp_ratio)
 
-        attn = (q @ k.transpose(-2, -1))
-        if attn_mask:
-            mask = self.get_attention_mask(attn.shape, nb_task_tokens)
-            attn[mask] = -float('inf')
-        attn = attn.softmax(dim=-1)
+    def reset_parameters(self):
+        self.norm1.reset_parameters()
+        self.attn.reset_parameters()
+        self.norm2.reset_parameters()
+        self.mlp.reset_parameters()
 
-        attn = self.attn_drop(attn)
+    def forward(self, x, mask_heads=None, task_index=1, attn_mask=None):
+        if isinstance(self.attn, split_ClassAttention) or isinstance(self.attn, split_JointCA):  # Like in CaiT
+            cls_token = x[:, :task_index]
+            xx = self.norm1(x)
+            xx, attn, v = self.attn(
+                xx,
+                mask_heads=mask_heads,
+                nb=task_index,
+                attn_mask=attn_mask
+            )
+            cls_token = self.drop_path(xx[:, :task_index]) + cls_token
+            cls_token = self.drop_path(self.mlp(self.norm2(cls_token))) + cls_token
 
-        x_cls = (attn @ v).transpose(1, 2).reshape(B, nb_task_tokens, C)
-        x_cls = self.proj(x_cls)
-        x_cls = self.proj_drop(x_cls)
+            return cls_token, attn, v
+        else:
+            xx = self.norm1(x)
+            xx, attn = self.attn(xx)
+            x = self.drop_path(xx) + x
+            x = self.drop_path(self.mlp(self.norm2(x))) + x
 
-        return x_cls, attn, v
+            return x, attn, None
 
 
 class split_PatchEmbed(nn.Module):
@@ -592,7 +622,6 @@ class split_PatchEmbed(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.num_patches = num_patches
-
         self.proj = split_blocks.split_Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size, simple_proj=True)
         self.apply(self._init_weights)
 
@@ -620,7 +649,6 @@ class split_PatchEmbed(nn.Module):
         #    f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
         x = self.proj(x).flatten(2).transpose(1, 2)
         return x
-
 
 
 class HybridEmbed(nn.Module):
@@ -665,8 +693,7 @@ class ConVit_Split(nn.Module):
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0., hybrid_backbone=None, norm_layer='layer',
                  local_up_to_layer=3, locality_strength=1., use_pos_embed=True,
-                 class_attention=False, ca_type='base', split_block_config={}, dense_mode=['attn', 'mlp']
-        ):
+                 class_attention=False, ca_type='base', split_block_config={}, dense_mode=['attn', 'mlp']):
         super().__init__()
         self.num_classes_list = [num_classes]
         self.num_heads_list = [num_heads]
@@ -677,7 +704,6 @@ class ConVit_Split(nn.Module):
 
         if norm_layer == 'layer':
             norm_layer = split_blocks.split_LayerNorm
-            #norm_layer = nn.LayerNorm
         elif norm_layer == 'scale':
             raise NotImplementedError(f'Split scale normalization not implemented')
         else:
@@ -688,18 +714,18 @@ class ConVit_Split(nn.Module):
         else:
             self.patch_embed = split_PatchEmbed(
                 img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+        
         num_patches = self.patch_embed.num_patches
         self.num_patches = num_patches
-
+        
         self.cls_token_list = nn.ParameterList([nn.Parameter(torch.zeros(1, 1, embed_dim))])
         self.pos_drop = nn.Dropout(p=drop_rate)
-
+        
         if self.use_pos_embed:
             self.pos_embed_list = nn.ParameterList([nn.Parameter(torch.zeros(1, num_patches, embed_dim))])
             trunc_normal_(self.pos_embed_list[-1], std=.02)
-
+        
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
-
         blocks = []
 
         if ca_type == 'base':
@@ -708,7 +734,7 @@ class ConVit_Split(nn.Module):
             ca_block = split_JointCA
         else:
             raise ValueError(f'Unknown CA type {ca_type}')
-
+            
         for layer_index in range(depth):
             if layer_index < local_up_to_layer:
                 # Convit
@@ -734,17 +760,14 @@ class ConVit_Split(nn.Module):
                     attention_type=ca_block,
                     split_block_config=split_block_config, dense_mode=dense_mode
                 )
-
             blocks.append(block)
 
         self.blocks = nn.ModuleList(blocks)
         self.norm = norm_layer(embed_dim)
         self.use_class_attention = class_attention
-
         # Classifier head
         self.feature_info = [dict(num_chs=embed_dim, reduction=0, module='head')]
         self.head = split_blocks.split_Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
-
         trunc_normal_(self.cls_token_list[-1], std=.02)
         self.head.apply(self._init_weights)
 
@@ -758,7 +781,6 @@ class ConVit_Split(nn.Module):
             p.requires_grad = False
         self.cls_token_list.append(nn.Parameter(torch.zeros(1, 1, extra_dim).to(self.patch_embed.proj.device)))
         trunc_normal_(self.cls_token_list[-1], std=.02)
-
         if self.use_pos_embed:
             for p in self.pos_embed_list.parameters():
                 p.requires_grad = False
@@ -766,11 +788,9 @@ class ConVit_Split(nn.Module):
             trunc_normal_(self.pos_embed_list[-1], std=.02)
         for block in self.blocks:
             block.expand(extra_dim, extra_heads)
-
         self.norm.expand(extra_dim)
         if self.num_classes > 0:
             self.head.expand(extra_dim, extra_classes)
-
 
     @property
     def cls_token(self):
