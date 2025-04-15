@@ -192,6 +192,11 @@ class split_GPSA(nn.Module):
             p.requires_grad = False
         self.gating_param_list.append(nn.Parameter(torch.ones(extra_heads).to(self.q.device)))
 
+
+    @property
+    def gating_param(self):
+        return torch.cat(list(self.gating_param_list), dim=-1)
+
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
@@ -200,6 +205,9 @@ class split_GPSA(nn.Module):
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
+
+    def reset_parameters(self):
+        self.apply(self._init_weights)
 
     def forward(self, x):
         B, N, C = x.shape
