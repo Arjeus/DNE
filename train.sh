@@ -11,7 +11,6 @@ python main.py \
     --device cuda:0 \
     --output-basedir ./checkpoints \
     --extra-dim 64 \
-    --extra-heads 1 \
+    --extra-heads 2 \
     --dist_url 'env://' \
     --no-distributed
-

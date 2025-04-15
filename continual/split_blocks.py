@@ -269,17 +269,38 @@ class split_Linear(nn.Module):
     @property
     def device(self):
         return self.linear_list[0].weight.device
+    
+    def _init_weights(self, m):
+        """ Add the missing _init_weights method """
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
 
-    def freeze_split_old(self):
-        for b in range(self.block_length-1):
-            for p in self.linear_list[b].parameters():
+    def local_init_latest_v(self, dim):
+        self.linear_list[-1].weight.data[-dim:, -dim:].copy_(torch.eye(dim))
+
+    
+    def reset_parameters(self):
+        self.apply(self._init_weights)
+
+def freeze_split_old(self):
+    for b in range(len(self.linear_list) - 1):
+        for p in self.linear_list[b].parameters():
+            p.requires_grad = False
+
+        # Only try to freeze attn_blocks if they exist and are populated
+        if hasattr(self, 'attn_blocks') and b < len(self.attn_blocks):
+            for p in self.attn_blocks[b].parameters():
                 p.requires_grad = False
-            if not self.simple_proj:
-                for p in self.proj_blocks[b].parameters():
-                    p.requires_grad = False
-                if not self.fix_attn:
-                    for p in self.attn_blocks[b].parameters():
-                        p.requires_grad = False
+                
+        # Similarly for proj_blocks
+        if not self.simple_proj and hasattr(self, 'proj_blocks') and b < len(self.proj_blocks):
+            for p in self.proj_blocks[b].parameters():
+                p.requires_grad = False
 
     def fix_and_update_attn(self):
         if self.simple_proj:
