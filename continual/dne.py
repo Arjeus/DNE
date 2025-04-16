@@ -6,7 +6,7 @@ from torch import nn
 
 import continual.utils as cutils
 import continual.split_blocks as split_blocks
-
+from .split_blocks import split_Linear
 
 class split_ContinualClassifier(nn.Module):
     """Your good old classifier to do continual."""
@@ -53,7 +53,7 @@ class split_ContinualClassifier(nn.Module):
         self.embed_dim += extra_dim
 
 
-class DNE(nn.Module):
+class DNE(nn.Module): # Replace DNE with your actual model class name if different
     def __init__(
         self,
         transformer,
@@ -541,6 +541,29 @@ class DNE(nn.Module):
         tokens, last_token, _ = self.forward_features(x)
         return self.forward_classifier(tokens, last_token)
 
+    def fix_all_attn(self):
+        """
+        Calls fix_and_update_attn on relevant split_Linear layers within each block.
+        This should be called after training for a task is complete.
+        """
+        for blk in self.sabs:
+            # Assuming split_Block has split_Linear layers named 'attn.qkv', 'attn.proj', 'mlp.fc1', 'mlp.fc2' etc.
+            # Adjust these names based on your actual split_Block structure.
+            # We need to call fix_and_update_attn specifically on the layers that use it (non-simple_proj)
+            
+            # Example for MLP layers (if they use split_Linear with attention)
+            if hasattr(blk.mlp, 'fc1') and isinstance(blk.mlp.fc1, split_Linear) and not blk.mlp.fc1.simple_proj:
+                 blk.mlp.fc1.fix_and_update_attn()
+            if hasattr(blk.mlp, 'fc2') and isinstance(blk.mlp.fc2, split_Linear) and not blk.mlp.fc2.simple_proj:
+                 blk.mlp.fc2.fix_and_update_attn()
+
+            # Example for Attention layers (if they use split_Linear with attention)
+            # Check the specific attributes within your attention mechanism
+            if hasattr(blk.attn, 'qkv') and isinstance(blk.attn.qkv, split_Linear) and not blk.attn.qkv.simple_proj:
+                 blk.attn.qkv.fix_and_update_attn()
+            if hasattr(blk.attn, 'proj') and isinstance(blk.attn.proj, split_Linear) and not blk.attn.proj.simple_proj:
+                 blk.attn.proj.fix_and_update_attn()
+            # Add similar checks for other split_Linear layers within blk.attn if necessary
 
 def eval_training_finetuning(mode, in_ft):
     if 'tr' in mode and 'ft' in mode:

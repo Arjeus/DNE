@@ -731,6 +731,10 @@ def main(args):
 
         nb_classes += args.increment
 
+        if hasattr(model_without_ddp, 'fix_all_attn'):
+             print(f"Fixing attention for task {task_id}")
+             model_without_ddp.fix_all_attn()
+
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
@@ -743,7 +747,6 @@ def main(args):
         if log_path is not None and utils.is_main_process():
             with open(log_path, 'a+') as f:
                 f.write(json.dumps(log_store['summary']) + '\n')
-
 
 
 def load_options(args, options):

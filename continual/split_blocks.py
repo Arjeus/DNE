@@ -69,7 +69,7 @@ class Proj_wAttn(nn.Module):
             attn_mask = (self.attn.max(dim=2)[0] > self.attn_thd)
             forward_attn = self.attn.expand(B, N, -1, -1)
         else:
-            attn_mask = torch.ones(true_head_num, dtype=torch.bool).to(x.device)
+            attn_mask = torch.ones(true_head_num, dtype=torch.bool).cuda()
             forward_attn = attn
         if self.proj_type == "shared_Linear":
             x_proj = self.proj_blocks(x)
@@ -94,8 +94,7 @@ class Task_Attn(nn.Module):
         self.lambda_scaled = lambda_scaled
         self.lambda_scaled_init = lambda_scaled_init
         if self.lambda_scaled:
-            # Replace hardcoded cuda() with device-agnostic approach
-            self.lambda_factor = nn.Parameter(torch.ones(1) * lambda_scaled_init)
+            self.lambda_factor = nn.Parameter(torch.ones(1).cuda() * lambda_scaled_init)
 
         self.record_mean = record_mean and True
         self.mean_attn = None
@@ -130,14 +129,13 @@ class Task_Attn(nn.Module):
         self.apply(self._init_weights)
         self.mean_attn = None
         if self.lambda_scaled:
-            self.lambda_factor = nn.Parameter(torch.ones(1) * self.lambda_scaled_init)
+            self.lambda_factor = nn.Parameter(torch.ones(1).cuda() * self.lambda_scaled_init)
 
     def update_mean_attn(self, attn):
         B, N, H1, H2 = attn.shape
         attn = attn.reshape(B*N, H1, H2).mean(dim=0).detach()
         if self.mean_attn is None:
-            # Replace hardcoded .cuda() with device from input tensor
-            self.mean_attn = torch.ones(H1, H2).to(attn.device) / (1 if self.constant_scaled else H2)
+            self.mean_attn = torch.ones(H1, H2).cuda() / (1 if self.constant_scaled else H2)
         self.mean_attn = (1 - self.momentun) * attn + self.momentun * self.mean_attn
 
     def _init_weights(self, m):
@@ -160,8 +158,7 @@ class Task_Attn(nn.Module):
                 x_old = x_old.unsqueeze(1)
             B, N, C2 = x_old.shape
             H2 = C2 // self.head_dim
-            # Replace hardcoded .cuda() with device from input tensor
-            attn = torch.ones(B, N, H1, H2).to(x_new.device)
+            attn = torch.ones(B, N, H1, H2).cuda()
             if not self.constant_scaled:
                 attn = attn.softmax(dim=-1)
             if self.mean_attn is None:
@@ -269,38 +266,17 @@ class split_Linear(nn.Module):
     @property
     def device(self):
         return self.linear_list[0].weight.device
-    
-    def _init_weights(self, m):
-        """ Add the missing _init_weights method """
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
 
-    def local_init_latest_v(self, dim):
-        self.linear_list[-1].weight.data[-dim:, -dim:].copy_(torch.eye(dim))
-
-    
-    def reset_parameters(self):
-        self.apply(self._init_weights)
-
-def freeze_split_old(self):
-    for b in range(len(self.linear_list) - 1):
-        for p in self.linear_list[b].parameters():
-            p.requires_grad = False
-
-        # Only try to freeze attn_blocks if they exist and are populated
-        if hasattr(self, 'attn_blocks') and b < len(self.attn_blocks):
-            for p in self.attn_blocks[b].parameters():
-                p.requires_grad = False
-                
-        # Similarly for proj_blocks
-        if not self.simple_proj and hasattr(self, 'proj_blocks') and b < len(self.proj_blocks):
-            for p in self.proj_blocks[b].parameters():
-                p.requires_grad = False
+    def freeze_split_old(self):
+        # Freeze parameters only if using non-fixed attention blocks
+        if not self.simple_proj and not self.fix_attn:
+            # Iterate only over the currently existing blocks in attn_blocks
+            # The previous fix ensured len(self.attn_blocks) is used for the range.
+            for b in range(len(self.attn_blocks)):
+                 # Check added for safety, although range(len()) should suffice
+                if b < len(self.attn_blocks):
+                    for p in self.attn_blocks[b].parameters():
+                        p.requires_grad = False
 
     def fix_and_update_attn(self):
         if self.simple_proj:
@@ -330,7 +306,7 @@ def freeze_split_old(self):
         self.in_features_list.append(in_features)
         self.out_features_list.append(out_features)
         if fix_old:
-            self.freeze_split_old()
+            self.freeze_split_old() # Freezes previous attn_blocks if applicable
         if self.simple_proj:
             if self.stack:
                 extra_linear = nn.Linear(sum(self.in_features_list), out_features, bias=self.bias).to(self.device)
@@ -347,9 +323,13 @@ def freeze_split_old(self):
                                     proj_type=self.proj_type, self_attn=self.self_attn, extra_heads=extra_heads).to(self.device)
             self.proj_blocks.append(extra_proj)
 
+            # This part handles the creation of the *new* curr_attn_block
+            # It does not belong in freeze_split_old
             if self.fix_attn:
                 self.curr_attn_block.reset_parameters()
             else:
+                # Before creating the new curr_attn_block, the old one
+                # should have been added to attn_blocks by fix_and_update_attn
                 if self.attn_qk_linear:
                     self.curr_attn_block = Task_Attn(self.head_dim, record_mean=self.fix_attn,
                                                      self_attn=self.self_attn, lambda_scaled_init=head_num,
@@ -418,6 +398,7 @@ def freeze_split_old(self):
                     if b == 0:
                         outs.append(self.linear_list[0](input[..., :self.in_features_list[0]]))
                         continue
+                    # Process block b (where b > 0)
                     old_features = sum(self.in_features_list[:b])
                     curr_features = sum(self.in_features_list[:b+1])
 
@@ -429,7 +410,12 @@ def freeze_split_old(self):
                         proj_input = input[..., :curr_features] if self.self_attn else input[..., :old_features]
                         proj = self.proj_blocks[b](proj_input)
                     else:
-                        attn = self.attn_blocks[b](input[..., :old_features], input[..., old_features:curr_features])
+                        # Add assertion to check if attn_blocks has been updated correctly
+                        assert b-1 < len(self.attn_blocks), \
+                            f"Index {b-1} out of range for attn_blocks (len={len(self.attn_blocks)}). " \
+                            f"Ensure fix_and_update_attn() was called after the previous expansion phase."
+                        # Access attn_blocks using the adjusted index
+                        attn = self.attn_blocks[b-1](input[..., :old_features], input[..., old_features:curr_features])
                         proj_input = input[..., :curr_features] if self.self_attn else input[..., :old_features]
                         proj = self.proj_blocks[b](proj_input, attn)
                     if len(proj.shape) > len(input.shape):
@@ -439,6 +425,7 @@ def freeze_split_old(self):
                     else:
                         out += proj
                     outs.append(out)
+        # Process the last (current) block
         if self.simple_proj or self.block_length == 1:
             if self.stack or not self.split:
                 outs.append(self.linear_list[-1](input))
@@ -450,6 +437,7 @@ def freeze_split_old(self):
                 out = 0
             else:
                 out = self.linear_list[-1](input[..., old_features:])
+            # Use curr_attn_block for the latest block's attention
             attn = self.curr_attn_block(input[..., :old_features], input[..., old_features:])
             proj_input = input if self.self_attn else input[..., :old_features]
             proj = self.proj_blocks[-1](proj_input, attn)
