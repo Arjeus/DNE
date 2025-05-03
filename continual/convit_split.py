@@ -900,3 +900,5 @@ class ConVit_Split(nn.Module):
         x = self.forward_features(x)[0]
         x = self.head(x)
         return x
+
+
