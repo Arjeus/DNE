@@ -9,9 +9,14 @@ import lmdb
 import pickle
 import six
 from PIL import Image
+import pdb
+
+from sklearn.datasets import load_digits
+from torch.utils.data import Dataset
+import torchvision.transforms as T
 
 from continuum import ClassIncremental
-from continuum.datasets import CIFAR100, ImageNet100, ImageFolderDataset
+from continuum.datasets import CIFAR100, ImageNet100, ImageFolderDataset, InMemoryDataset
 from timm.data import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torchvision import transforms
@@ -70,6 +75,62 @@ class ImageFolderLMDB(torch.utils.data.Dataset):
 
     def __repr__(self):
         return self.__class__.__name__ + ' (' + self.db_path + ')'
+    
+class DigitsAsCifar(InMemoryDataset):
+    """scikit‑learn Digits, shaped like CIFAR‑100 and usable by Continuum."""
+    def __init__(
+        self,
+        train: bool = True,
+        test_split: float = 0.5,
+        seed: int = 0,
+        transform=None,
+    ):
+        # ------------------------------------------------------------------
+        # 1. load the raw 8×8 greyscale images
+        # ------------------------------------------------------------------
+        ds = load_digits()                                    # (1797, 8, 8)
+        imgs8, labels = ds.images, ds.target
+
+        # ------------------------------------------------------------------
+        # 2. stratified 50 %/50 % split – keeps CL experiments reproducible
+        # ------------------------------------------------------------------
+        rng = np.random.RandomState(seed)
+        order = rng.permutation(len(imgs8))
+        split = int(len(imgs8) * test_split)
+        idxs = order[split:] if train else order[:split]
+
+        # ------------------------------------------------------------------
+        # 3. upscale 8×8→32×32 and copy the single channel → RGB
+        #    Continuum expects H×W×C uint8 in [0, 255]
+        # ------------------------------------------------------------------
+        x = np.kron(imgs8[idxs], np.ones((4, 4)))             # 32×32 grey
+        x = (x * 255 / 16).astype(np.uint8)[..., None]        # scale + channel
+        x = np.repeat(x, 3, axis=3)                          # → RGB
+        y = labels[idxs]
+
+        # ------------------------------------------------------------------
+        # 4. optional TorchVision transform pipeline
+        # ------------------------------------------------------------------
+        self.transform = transform or T.Compose([
+            T.ToPILImage(),
+            T.ToTensor(),                                     # 0‑1 float32
+            T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ])
+
+        # ------------------------------------------------------------------
+        # 5. call the real Continuum constructor
+        # ------------------------------------------------------------------
+        super().__init__(x=x, y=y)    # InMemoryDataset stores the arrays
+
+    # ----------------------------------------------------------------------
+    #  The parent class already implements `get_data()`, but we overload
+    #  `__getitem__` only to plug in our TorchVision transforms.
+    # ----------------------------------------------------------------------
+    def __getitem__(self, index):
+        img, label, _ = super().__getitem__(index)            # img is uint8
+        img = self.transform(img)                             # Tensor
+        return img, label
+
 
 class ImageNet1000(ImageFolderDataset):
     """Continuum dataset for datasets with tree-like structure.
@@ -147,6 +208,10 @@ def build_dataset(is_train, args):
             args.data_path, train=is_train,
             data_subset=os.path.join('./imagenet100_splits', "train_100.txt" if is_train else "val_100.txt")
         )
+    elif args.data_set.lower() == 'digits':
+        # replace CIFAR with Digits transparently
+        dataset = DigitsAsCifar(train=is_train)
+
     elif args.data_set.lower() == 'imagenet1000':
         dataset = ImageNet1000(args.data_path, train=is_train)
     else:

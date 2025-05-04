@@ -14,8 +14,8 @@ eval_every: 50
 
 # Base hyperparameter
 weight_decay: 0.000001
-batch_size: 64
-incremental_batch_size: 64
+batch_size: 20
+incremental_batch_size: 20
 incremental_lr: 0.0005
 rehearsal: icarl_all
 

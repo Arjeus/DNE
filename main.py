@@ -737,6 +737,9 @@ def main(args):
     print(f'Setting {args.data_set} with {args.initial_increment}-{args.increment}')
     print(f"All accuracies: {accuracy_list}")
     print(f"Average Incremental Accuracy: {statistics.mean(accuracy_list)}")
+    # Add final parameter count after full training
+    final_n_params = sum(p.numel() for p in model_without_ddp.parameters() if p.requires_grad)
+    print(f"Number of params after full training: {final_n_params}")
     if args.name:
         print(f"Experiment name: {args.name}")
         log_store['summary'] = {"avg": statistics.mean(accuracy_list)}
