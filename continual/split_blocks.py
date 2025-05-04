@@ -277,9 +277,14 @@ class split_Linear(nn.Module):
             if not self.simple_proj:
                 for p in self.proj_blocks[b].parameters():
                     p.requires_grad = False
-                if not self.fix_attn:
-                    for p in self.attn_blocks[b].parameters():
-                        p.requires_grad = False
+                # if not self.fix_attn:
+                #     for p in self.attn_blocks[b].parameters():
+                #         p.requires_grad = False
+            # attn_blocks may not exist yet for the earliest expansion
+            if (not self.fix_attn) and hasattr(self, "attn_blocks") \
+                    and b < len(self.attn_blocks):
+                for p in self.attn_blocks[b].parameters():
+                    p.requires_grad = False       
 
     def fix_and_update_attn(self):
         if self.simple_proj:
