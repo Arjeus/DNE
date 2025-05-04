@@ -314,6 +314,8 @@ class split_Linear(nn.Module):
         self.in_features_list.append(in_features)
         self.out_features_list.append(out_features)
         if fix_old:
+            # save the attention of the task that has just finished
+            self.fix_and_update_attn()
             self.freeze_split_old()
         if self.simple_proj:
             if self.stack:
