@@ -1,6 +1,7 @@
 .idea/
 checkpoints/
-continual/
-data/
 logs/
 single_gpu_run.batch
+continual/__pycache__/
+continual/cnn/__pycache__/
+data/CIFAR100*
