@@ -31,6 +31,8 @@ from continual.sam import SAM
 from continual.datasets import build_dataset
 from continual.engine import eval_and_log, train_one_epoch
 from continual.losses import bce_with_logits, soft_bce_with_logits
+from sklearn.metrics import confusion_matrix
+from torch.utils.data import ConcatDataset, DataLoader
 
 warnings.filterwarnings("ignore")
 
@@ -747,6 +749,29 @@ def main(args):
             with open(log_path, 'a+') as f:
                 f.write(json.dumps(log_store['summary']) + '\n')
 
+    # Compute and save confusion matrix on full test set
+    if utils.is_main_process():
+        full_test_dataset = ConcatDataset(scenario_val)
+        test_loader = DataLoader(
+            full_test_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem
+        )
+        y_true, y_pred = [], []
+        model_without_ddp.eval()
+        with torch.no_grad():
+            for imgs, labels in test_loader:
+                imgs, labels = imgs.to(device), labels.to(device)
+                outputs = model_without_ddp(imgs)
+                preds = outputs.argmax(dim=1)
+                y_true.extend(labels.cpu().numpy())
+                y_pred.extend(preds.cpu().numpy())
+        cm = confusion_matrix(y_true, y_pred)
+        print("Confusion Matrix:")
+        print(cm)
+        np.save(os.path.join(args.output_dir, "confusion_matrix.npy"), cm)
 
 
 def load_options(args, options):

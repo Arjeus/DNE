@@ -14,6 +14,6 @@ python main.py \
     --extra-heads 1 \
     --dist_url 'env://' \
     --no-distributed \
-    --base-epochs 10 \
-    --epochs 10 \
+    --base-epochs 100 \
+    --epochs 100 \
     --memory-size 0
