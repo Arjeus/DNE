@@ -12,6 +12,7 @@ import time
 import warnings
 from pathlib import Path
 import yaml
+import pdb
 
 import numpy as np
 import torch
@@ -750,28 +751,34 @@ def main(args):
                 f.write(json.dumps(log_store['summary']) + '\n')
 
     # Compute and save confusion matrix on full test set
-    if utils.is_main_process():
-        full_test_dataset = ConcatDataset(scenario_val)
-        test_loader = DataLoader(
-            full_test_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_mem
-        )
-        y_true, y_pred = [], []
-        model_without_ddp.eval()
-        with torch.no_grad():
-            for imgs, labels in test_loader:
-                imgs, labels = imgs.to(device), labels.to(device)
-                outputs = model_without_ddp(imgs)
-                preds = outputs.argmax(dim=1)
-                y_true.extend(labels.cpu().numpy())
-                y_pred.extend(preds.cpu().numpy())
-        cm = confusion_matrix(y_true, y_pred)
-        print("Confusion Matrix:")
-        print(cm)
-        np.save(os.path.join(args.output_dir, "confusion_matrix.npy"), cm)
+    full_test_dataset = ConcatDataset(scenario_val)
+    test_loader = DataLoader(
+        full_test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem
+    )
+    y_true, y_pred = [], []
+    model_without_ddp.eval()
+    with torch.no_grad():
+        for imgs, labels, _ in test_loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            outputs = model_without_ddp(imgs)
+            # handle models returning a dict of outputs (e.g., DyTox)
+            if isinstance(outputs, dict):
+                logits = outputs['logits']
+            else:
+                logits = outputs
+            preds = logits.argmax(dim=1)
+            y_true.extend(labels.cpu().numpy())
+            y_pred.extend(preds.cpu().numpy())
+    cm = confusion_matrix(y_true, y_pred)
+    print("Confusion Matrix:")
+    print(cm)
+    # Save confusion matrix as CSV
+    csv_path = os.path.join(args.output_dir, "confusion_matrix.csv")
+    np.savetxt(csv_path, cm, delimiter=",", fmt="%d")
 
 
 def load_options(args, options):

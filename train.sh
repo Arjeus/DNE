@@ -16,4 +16,5 @@ python main.py \
     --no-distributed \
     --base-epochs 100 \
     --epochs 100 \
-    --memory-size 0
+    --memory-size 0 \
+    --seed 20
