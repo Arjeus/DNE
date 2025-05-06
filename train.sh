@@ -4,7 +4,7 @@ echo "Launching training on GPU..."
 # Run the training with explicit device assignment and 
 # Note: using underscore instead of hyphen for dist_url
 python main.py \
-    --options options/data/digits_5.yaml options/data/digits_order1.yaml options/model/cifar_dne.yaml \
+    --options options/data/iris_3.yaml options/data/iris_order1.yaml options/model/cifar_dne.yaml \
     --name dne_64dim_digits \
     --data-path ./data/DIGITS/ \
     --log-path ./logs \
@@ -17,4 +17,4 @@ python main.py \
     --base-epochs 100 \
     --epochs 100 \
     --memory-size 0 \
-    --seed 20
+    --seed 0

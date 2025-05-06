@@ -1,6 +1,6 @@
-data_set: digits
+data_set: iris
 initial_increment: 1
 increment: 1
 memory_size: 0
 
-log_category: 10-5
+log_category: 3-3

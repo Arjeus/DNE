@@ -23,6 +23,9 @@ from torchvision import transforms
 from torchvision.datasets.folder import ImageFolder, default_loader
 from torchvision.transforms import functional as Fv
 
+from sklearn.datasets import load_iris
+from PIL import Image
+
 try:
     interpolation = Fv.InterpolationMode.BICUBIC
 except:
@@ -75,6 +78,57 @@ class ImageFolderLMDB(torch.utils.data.Dataset):
 
     def __repr__(self):
         return self.__class__.__name__ + ' (' + self.db_path + ')'
+    
+class IrisAsCifar(InMemoryDataset):
+    """Tabular Iris → 32×32 RGB images that mimic CIFAR‑100."""
+    def __init__(
+        self,
+        train: bool = True,
+        test_split: float = 0.5,
+        seed: int = 0,
+        transform=None,
+    ):
+        # 1 Load the 150×4 tabular iris data
+        iris = load_iris()                                      # 3 classes, 150 samples :contentReference[oaicite:1]{index=1}
+        X, y = iris.data.astype(np.float32), iris.target
+        n_samples, n_features = X.shape                         # 150, 4
+
+        # 2 Compute global min/max per feature for stable scaling
+        mins = X.min(axis=0)
+        maxs = X.max(axis=0)
+        span = np.where(maxs > mins, maxs - mins, 1.0)          # avoid /0
+
+        # 3 Stratified 50 % / 50 % split to stay reproducible
+        rng = np.random.RandomState(seed)
+        perm = rng.permutation(n_samples)
+        split = int(n_samples * test_split)
+        idxs = perm[split:] if train else perm[:split]
+        X, y = X[idxs], y[idxs]
+
+        # 4 Encode every sample into a 32×32×3 uint8 image
+        imgs = np.zeros((len(X), 32, 32, 3), dtype=np.uint8)
+        for i, row in enumerate(X):
+            for f in range(n_features):
+                # scale 0‑255
+                v = int((row[f] - mins[f]) / span[f] * 255)
+                r0, r1 = 8 * f, 8 * (f + 1)                     # stripe rows
+                imgs[i, r0:r1, :, :] = v                       # broadcast
+
+        # 5 Default TorchVision transforms (can be overridden)
+        self.transform = transform or T.Compose([
+            T.ToPILImage(),             # uint8 → PIL
+            T.ToTensor(),               # → float32 [0,1]
+            T.Normalize((0.5,)*3, (0.5,)*3),
+        ])
+
+        # 6 Call Continuum’s constructor
+        super().__init__(x=imgs, y=y)
+
+    # Override only to inject TorchVision transforms
+    def __getitem__(self, index):
+        img, label, _ = super().__getitem__(index)  # img is uint8 HWC
+        img = self.transform(img)
+        return img, label
     
 class DigitsAsCifar(InMemoryDataset):
     """scikit‑learn Digits, shaped like CIFAR‑100 and usable by Continuum."""
@@ -211,6 +265,10 @@ def build_dataset(is_train, args):
     elif args.data_set.lower() == 'digits':
         # replace CIFAR with Digits transparently
         dataset = DigitsAsCifar(train=is_train)
+    
+    elif args.data_set.lower() == 'iris':
+        # replace CIFAR with Digits transparently
+        dataset = IrisAsCifar(train=is_train)
 
     elif args.data_set.lower() == 'imagenet1000':
         dataset = ImageNet1000(args.data_path, train=is_train)
