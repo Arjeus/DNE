@@ -13,4 +13,4 @@ python main.py \
     --data-path ./data/CIFAR100/ \
     --log-path ./logs \
     --device cuda:0 \
-    --output-basedir ./checkpoints --extra-dim 224 --extra-heads 1
+    --output-basedir ./checkpoints --extra-dim 64 --extra-heads 1
