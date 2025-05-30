@@ -475,6 +475,15 @@ def main(args):
                 dataset_train.add_samples(*memory.get())
                 print(f"{len(dataset_train) - previous_size} samples added from memory.")
 
+                # Get all labels and count efficiently
+                labels = [dataset_train[i][1] for i in range(len(dataset_train))]
+                unique_labels, counts = np.unique(labels, return_counts=True)
+
+                print(f"Samples per class in dataset_train:")
+                for label, count in zip(unique_labels, counts):
+                    print(f"  Class {label}: {count} samples")
+                print(f"Total samples: {len(dataset_train)}")
+
             if args.only_ft:
                 dataset_train = get_finetuning_dataset(dataset_train, memory, 'balanced')
         # ----------------------------------------------------------------------
@@ -625,7 +634,6 @@ def main(args):
                             'scaler': loss_scaler.state_dict(),
                             'args': args,
                         }, checkpoint_path)
-
             if args.eval_every and (epoch % args.eval_every  == 0 or (args.finetuning and epoch == epochs - 1)):
                 eval_and_log(
                     args, output_dir, model, model_without_ddp, optimizer, lr_scheduler,
@@ -675,7 +683,6 @@ def main(args):
                 use_look_sam=args.look_sam_k > 0, look_sam_alpha=args.look_sam_alpha
             )
         # ----------------------------------------------------------------------
-
         if args.finetuning and memory and (task_id > 0 or scenario_train.nb_classes == args.initial_increment) and not skipped_task:
             dataset_finetune = get_finetuning_dataset(dataset_train, memory, args.finetuning)
             print(f'Finetuning phase of type {args.finetuning} with {len(dataset_finetune)} samples.')
