@@ -1,6 +1,6 @@
 data_set: digits
-initial_increment: 1
-increment: 1
-memory_size: 0
+initial_increment: 2
+increment: 2
+memory_size: 100
 
 log_category: 10-5
