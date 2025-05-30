@@ -1,0 +1,37 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu
+#SBATCH --job-name=dne_64dim_digits
+#SBATCH --ntasks-per-node=1
+#SBATCH --output=dne_64dim_digits_%j.log
+#SBATCH --error=dne_64dim_digits_err_%j.log
+#SBATCH --gres=gpu:1
+
+cd /mnt/lustre/coe-pchc/home/aaguevarra/DNE
+
+echo "SLURM_JOBID="$SLURM_JOBID
+echo "SLURM_JOB_NODELIST"=$SLURM_JOB_NODELIST
+echo "SLURM_NNODES"=$SLURM_NNODES
+echo "SLURMTMPDIR="$SLURMTMPDIR
+echo "working directory = "$SLURM_SUBMIT_DIR
+
+# Load conda and properly initialize it
+module load conda
+eval "$(conda shell.bash hook)"
+conda activate dne_env
+
+# print current conda environment
+echo "Current conda environment: $(conda info --envs | grep '*' | awk '{print $1}')"
+
+# Calculate the appropriate number of heads for the given extra dimensions
+# For embed_dim 384 with 12 heads, each head has 32 dimensions
+# For extra_dim 64, we need 2 extra heads to maintain same dimension per head
+
+echo "Launching training on GPU..."
+python main.py \
+--options options/data/cifar100_50-10.yaml options/data/cifar100_order1.yaml options/model/cifar_dne.yaml \
+    --name dne_mlp_dense_only_cifar100_b50_10 \
+    --data-path ./data/CIFAR100/ \
+    --log-path ./logs \
+    --device cuda:0 \
+    --output-basedir ./checkpoints --extra-dim 224 --extra-heads 1
