@@ -17,4 +17,4 @@ python main.py \
     --base-epochs 100 \
     --epochs 100 \
     --memory-size 100 \
-    --seed 0
+    --seed 273
